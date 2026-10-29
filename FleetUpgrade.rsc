@@ -22,7 +22,7 @@
 :local minRam 67108864
 # Retain this much free storage before every fetch. This is a
 # conservative guard, not a substitute for a signed size manifest.
-:local minFreeHdd 3554432
+:local minFreeHdd 554432
 
 # wifiwave2 (RouterOS 7.0-7.12) to 7.13+ split-driver mapping. Entries
 # are exact "/system routerboard get model" strings. Lookup is exact
@@ -35,7 +35,14 @@
 # wifi-qcom: 802.11ax Qualcomm (IPQ50xx/IPQ60xx/IPQ807x). arm and arm64.
 :local wifiQcomModels {"C52iG-5HaxD2HaxD";"C52iG-5HaxD2HaxD-TC";"C53UiG+5HPaxD2HPaxD";"L41G-2axD";"cAPGi-5HaxD2HaxD";"wAPG-5HaxD2HaxD";"S53UG+5HaxD2HaxD";"S53UG+5HaxD2HaxD-TC";"S53UG+M-5HaxD2HaxD";"S53UG+M-5HaxD2HaxD-TC";"H53UiG-5HaxQ2HaxQ";"L009UiGS-2HaxD-IN";"L009UiGS-2HaxD";"L22UGS-5HaxD2HaxD-15S";"L23UGSR-5HaxD2HaxD-NM";"L11UG-5HaxD-NB";"SXTsq-5axD"}
 # wifi-qcom/wifi-qcom-ac NPKs first exist in this RouterOS 7 minor.
+# Before it, legacy wireless drivers live inside the routeros bundle.
 :local wifiSplitMinor 13
+# Devices with radios but no enabled standalone driver row (RouterOS v6
+# bundles wireless inside routeros) get the legacy "wireless" NPK on the
+# v7 jump: /interface wireless configuration and CAPsMAN v1 survive.
+# Set true to pick wifi-qcom-ac instead on boards in wifiQcomAcModels;
+# that discards the wireless configuration and is not for unattended use.
+:local preferQcomAcOnJump false
 
 # Prevent scheduler/manual overlap from racing files or markers.
 :do {
@@ -445,6 +452,44 @@
     :log error ("FleetUpgrade: stage=inventory attempt=0 reason=enabled package inventory failed")
     :error "FleetUpgrade: package inventory failed"
 }
+
+# Wireless hardware detection, v6/v7 safe. The menu paths are compiled
+# via :parse at run time so a missing /interface wifi (v6, or v7 without
+# a qcom driver) or a missing /interface wireless (v7 without the
+# wireless package) is a caught error, not a script-wide parse failure.
+:local wirelessIfCount 0
+:local wifiIfCount 0
+:do {
+    :local wlanCountCmd [:parse ":return [:len [/interface wireless find]]"]
+    :set wirelessIfCount [$wlanCountCmd]
+} on-error={ :set wirelessIfCount 0 }
+:if ($major = $requiredTargetMajor) do={
+    :do {
+        :local wifiCountCmd [:parse ":return [:len [/interface wifi find]]"]
+        :set wifiIfCount [$wifiCountCmd]
+    } on-error={ :set wifiIfCount 0 }
+}
+:if ([:typeof $wirelessIfCount] != "num") do={ :set wirelessIfCount 0 }
+:if ([:typeof $wifiIfCount] != "num") do={ :set wifiIfCount 0 }
+:local hasWirelessHardware false
+:if (($wirelessIfCount > 0) || ($wifiIfCount > 0)) do={ :set hasWirelessHardware true }
+# On v6 an enabled wireless sub-package row (bundled or individual) is
+# also evidence; radios may be absent from the interface list while the
+# package is scheduled or the driver did not bind.
+:if (($major = $v6Major) && $needWireless) do={ :set hasWirelessHardware true }
+:log info ("FleetUpgrade: stage=inventory attempt=0 wireless-interfaces=" . $wirelessIfCount . \
+    " wifi-interfaces=" . $wifiIfCount . " wireless-hardware=" . $hasWirelessHardware)
+
+# Board key used by every model-list lookup: exact model first, then the
+# model with a trailing "&<modem>" part and a trailing "-TC" removed.
+:local boardKey $board
+:local ampPos [:find $board "&"]
+:if ([:typeof $ampPos] != "nil") do={ :set boardKey [:pick $board 0 $ampPos] }
+:local boardKeyLen [:len $boardKey]
+:if (($boardKeyLen > 3) && ([:pick $boardKey ($boardKeyLen - 3) $boardKeyLen] = "-TC")) do={
+    :set boardKey [:pick $boardKey 0 ($boardKeyLen - 3)]
+}
+
 :if ($needWifiQcom && $needWifiQcomAc) do={
     :log error ("FleetUpgrade: stage=inventory attempt=0 reason=both wifi-qcom and wifi-qcom-ac are enabled")
     :error "FleetUpgrade: conflicting enabled wireless packages"
@@ -478,13 +523,6 @@
         }
     }
     :if (($inAcMap = false) && ($inAxMap = false)) do={
-        :local boardKey $board
-        :local ampPos [:find $board "&"]
-        :if ([:typeof $ampPos] != "nil") do={ :set boardKey [:pick $board 0 $ampPos] }
-        :local keyLen [:len $boardKey]
-        :if (($keyLen > 3) && ([:pick $boardKey ($keyLen - 3) $keyLen] = "-TC")) do={
-            :set boardKey [:pick $boardKey 0 ($keyLen - 3)]
-        }
         :if ($boardKey != $board) do={
             :foreach m in=$wifiQcomAcModels do={
                 :if (($m != "") && ($m = $boardKey)) do={
@@ -520,6 +558,45 @@
         $wirelessPackage . "; wireless NPK not requested for v7 board=" . $board)
 }
 :if (($wirelessPackage = "") && $needWireless) do={ :set wirelessPackage "wireless" }
+
+# Radios present but no driver package resolved: on RouterOS v6 the
+# driver is inside the routeros bundle, and a v7 device may have lost
+# its driver row. Without a driver NPK the v7 target set would boot
+# with no WiFi. Default to legacy wireless so /interface wireless
+# configuration and CAPsMAN v1 survive; wifi-qcom-ac only on request.
+:local wirelessFromHardware false
+:if (($wirelessPackage = "") && $hasWirelessHardware && ($packageStage = "pkg-v7")) do={
+    :set wirelessPackage "wireless"
+    :set wirelessFromHardware true
+    :if ($preferQcomAcOnJump) do={
+        :local inAcMapHw false
+        :foreach m in=$wifiQcomAcModels do={
+            :if (($m != "") && (($m = $board) || ($m = $boardKey))) do={ :set inAcMapHw true }
+        }
+        :if ($inAcMapHw) do={
+            :if ($arch != "arm") do={
+                :log error ("FleetUpgrade: stage=inventory attempt=0 reason=preferQcomAcOnJump selected wifi-qcom-ac but it is arm-only architecture=" . \
+                    $arch . " board=" . $board)
+                :error "FleetUpgrade: wifi-qcom-ac unavailable for architecture"
+            }
+            :if ($targetMinor < $wifiSplitMinor) do={
+                :log error ("FleetUpgrade: stage=inventory attempt=0 reason=preferQcomAcOnJump requires target 7." . \
+                    $wifiSplitMinor . " or newer target=" . $targetVersion . " board=" . $board)
+                :error "FleetUpgrade: wifi-qcom-ac target below split release"
+            }
+            :set wirelessPackage "wifi-qcom-ac"
+            :log warning ("FleetUpgrade: stage=inventory attempt=0 reason=preferQcomAcOnJump selected wifi-qcom-ac; " . \
+                "/interface wireless configuration and CAPsMAN v1 will not migrate board=" . $board)
+        }
+    }
+    :log info ("FleetUpgrade: stage=inventory attempt=0 wireless hardware without enabled driver package; v7 package=" . \
+        $wirelessPackage . " board=" . $board . " preferQcomAcOnJump=" . $preferQcomAcOnJump)
+}
+:if (($wirelessPackage = "") && $hasWirelessHardware && ($packageStage = "pkg-v7")) do={
+    :log error ("FleetUpgrade: stage=inventory attempt=0 reason=wireless hardware detected but no wireless NPK could be resolved board=" . \
+        $board . " architecture=" . $arch)
+    :error "FleetUpgrade: wireless driver resolution failed"
+}
 
 # At/above target: never install packages. Firmware alignment may be an
 # upgrade or downgrade. The same expected firmware can reboot at most
@@ -650,6 +727,17 @@
     :local wantWirelessNpk false
     :if ($v7NpkNaming) do={
         :if ($wirelessPackage != "") do={ :set wantWirelessNpk true }
+        # Before 7.13 legacy wireless ships inside the routeros bundle and
+        # no wireless-<ver>-<arch>.npk exists.
+        :if (($wirelessPackage = "wireless") && ($targetMinor < $wifiSplitMinor)) do={
+            :set wantWirelessNpk false
+            :log info ("FleetUpgrade: stage=" . $packageStage . " attempt=" . $stageAttempt . \
+                " package=wireless is bundled in routeros before 7." . $wifiSplitMinor . "; no NPK constructed")
+        }
+        :if ($wantWirelessNpk && $wirelessFromHardware) do={
+            :log info ("FleetUpgrade: stage=" . $packageStage . " attempt=" . $stageAttempt . \
+                " package=" . $wirelessPackage . " selected from wireless hardware detection")
+        }
     } else={
         :if ($needWireless && $v6IndividualLayout) do={
             :set wantWirelessNpk true
