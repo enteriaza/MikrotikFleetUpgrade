@@ -1,14 +1,6 @@
-# ============================================================
-# MikroTik FleetUpgrade - fail-closed staged upgrade
-# Target: repository "version" file; v6 baseline: 6.49.23
-# Install as /system script named FleetUpgrade.
-# Lab validation on every hardware/package family is mandatory.
-# (c)2026 Chris Knipe <cknipe@opticnetworks.net>
-# ============================================================
-
 # Configuration (bytes unless noted).
-:local baseUrl "http://192.168.1.1/firmware_files/mikrotik/"
-:local serverIP "192.168.1.1"
+:local baseUrl "http://192.168.0.1/firmware_files/mikrotik/"
+:local serverIP "192.168.0.1"
 :local scriptName "FleetUpgrade"
 :local schedulerName "FleetUpgrade-startup"
 :local versionMetaFile "fleet-upgrade-version"
@@ -45,15 +37,15 @@
 :local preferQcomAcOnJump false
 
 # Prevent scheduler/manual overlap from racing files or markers.
-:do {
-    :if ([/system script job print count-only where script=$scriptName] > 1) do={
-        :log error ("FleetUpgrade: stage=init attempt=0 reason=another script instance is running")
-        :error "duplicate instance"
-    }
-} on-error={
-    :log error ("FleetUpgrade: stage=init attempt=0 reason=single-instance check failed")
-    :error "FleetUpgrade: single-instance check failed"
-}
+#:do {
+#    :if ([/system script job print count-only where script=$scriptName] > 1) do={
+#        :log error ("FleetUpgrade: stage=init attempt=0 reason=another script instance is running")
+#        :error "duplicate instance"
+#    }
+#} on-error={
+#    :log error ("FleetUpgrade: stage=init attempt=0 reason=single-instance check failed")
+#    :error "FleetUpgrade: single-instance check failed"
+#}
 
 # Locate exactly one installed script object.
 :local scriptId ""
@@ -820,7 +812,7 @@
     :local downloadedBytes 0
     :foreach fn in=$files do={
         :local url ($baseUrl . $fn)
-        :local partName ($fn . ".part")
+        :local partName ($fn)
         :do {
             :local beforeFree [/system resource get free-hdd-space]
             :if ($beforeFree < $minFreeHdd) do={ :error "free-storage reserve breached" }
@@ -857,44 +849,6 @@
         :log error ("FleetUpgrade: stage=" . $packageStage . " attempt=" . $stageAttempt . \
             " reason=one or more packages failed verification; no reboot")
         :error "FleetUpgrade: package verification failed"
-    }
-
-    # Re-verify every partial, then rename to final NPK names. Multi-file
-    # commit cannot be atomic on RouterOS; the marker/reboot still occurs
-    # only after the complete final set is reverified.
-    :do {
-        :foreach fn in=$files do={
-            :local verifiedPartName ($fn . ".part")
-            :local verifiedPart [/file find where name=$verifiedPartName]
-            :if ([:len $verifiedPart] != 1) do={ :error "partial package missing" }
-            :if ([/file get $verifiedPart size] = 0) do={ :error "partial package empty" }
-        }
-        :local afterFree [/system resource get free-hdd-space]
-        :if ($afterFree < $minFreeHdd) do={ :error "post-download free-storage reserve breached" }
-    } on-error={
-        :log error ("FleetUpgrade: stage=" . $packageStage . " attempt=" . $stageAttempt . \
-            " reason=final package-set verification failed; no reboot")
-        :error "FleetUpgrade: final package verification failed"
-    }
-
-    :do {
-        :foreach fn in=$files do={
-            :local commitPartName ($fn . ".part")
-            :local commitPart [/file find where name=$commitPartName]
-            :if ([:len $commitPart] != 1) do={ :error "commit partial missing" }
-            /file set $commitPart name=$fn
-        }
-        :foreach fn in=$files do={
-            :local committed [/file find where name=$fn]
-            :if ([:len $committed] != 1) do={ :error "committed package missing" }
-            :if ([/file get $committed size] = 0) do={ :error "committed package empty" }
-            :local committedPartName ($fn . ".part")
-            :if ([:len [/file find where name=$committedPartName]] > 0) do={ :error "partial remains" }
-        }
-    } on-error={
-        :log error ("FleetUpgrade: stage=" . $packageStage . " attempt=" . $stageAttempt . \
-            " reason=package commit/final verification failed; no reboot")
-        :error "FleetUpgrade: package commit failed"
     }
 
     :local stageMarker ("FleetUpgrade:state=" . $packageStage . ";expected=" . \
