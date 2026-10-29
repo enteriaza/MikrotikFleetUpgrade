@@ -806,24 +806,22 @@
         :error "FleetUpgrade: unmanaged NPK present"
     }
 
-    # Download to a non-installable .part name. Only expose final .npk
-    # names after every selected artifact is present and nonzero.
+    # Download directly to the final .npk name. RouterOS v6 cannot rename
+    # files, so a staging name is not possible; instead every selected
+    # NPK is removed again if any download fails, so a partial set is
+    # never left behind for a later reboot to install.
     :local downloadFailed false
     :local downloadedBytes 0
     :foreach fn in=$files do={
         :local url ($baseUrl . $fn)
-        :local partName ($fn)
         :do {
             :local beforeFree [/system resource get free-hdd-space]
             :if ($beforeFree < $minFreeHdd) do={ :error "free-storage reserve breached" }
             :local stale [/file find where name=$fn]
             :if ([:len $stale] > 0) do={ /file remove $stale }
             :if ([:len [/file find where name=$fn]] > 0) do={ :error "stale package remains" }
-            :local stalePart [/file find where name=$partName]
-            :if ([:len $stalePart] > 0) do={ /file remove $stalePart }
-            :if ([:len [/file find where name=$partName]] > 0) do={ :error "stale partial remains" }
-            /tool fetch url=$url mode=http dst-path=$partName keep-result=yes
-            :local downloaded [/file find where name=$partName]
+            /tool fetch url=$url mode=http dst-path=$fn keep-result=yes
+            :local downloaded [/file find where name=$fn]
             :if ([:len $downloaded] != 1) do={ :error "downloaded package missing or duplicated" }
             :local downloadedSize [/file get $downloaded size]
             :if ($downloadedSize = 0) do={ :error "downloaded package is zero bytes" }
@@ -837,14 +835,14 @@
     :if ($downloadFailed) do={
         :do {
             :foreach fn in=$files do={
-                :local failedPartName ($fn . ".part")
-                :local failedPart [/file find where name=$failedPartName]
-                :if ([:len $failedPart] > 0) do={ /file remove $failedPart }
+                :local failedFile [/file find where name=$fn]
+                :if ([:len $failedFile] > 0) do={ /file remove $failedFile }
+                :if ([:len [/file find where name=$fn]] > 0) do={ :error ("package remains " . $fn) }
             }
         } on-error={
             :log error ("FleetUpgrade: stage=" . $packageStage . " attempt=" . $stageAttempt . \
-                " reason=failed partial cleanup; no reboot")
-            :error "FleetUpgrade: partial cleanup failed"
+                " reason=failed-set cleanup incomplete; installable NPK may remain; no reboot")
+            :error "FleetUpgrade: failed-set cleanup failed"
         }
         :log error ("FleetUpgrade: stage=" . $packageStage . " attempt=" . $stageAttempt . \
             " reason=one or more packages failed verification; no reboot")
