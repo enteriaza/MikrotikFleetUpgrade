@@ -3,100 +3,88 @@
 # Fetches FleetUpgradeInstaller.rsc and /import's it when the
 # FleetUpgrade script or FleetUpgrade-startup scheduler is
 # missing. No-op when both are already present.
-# (c)2026 Chris Knipe <cknipe@opticnetworks.net>
+# Paste into the terminal wrapped in one { ... } block, or
+# /import this file. (c)2026 Chris Knipe
 # ============================================================
 
+{
 :local baseUrl "http://192.168.0.1/firmware_files/mikrotik/"
 :local scriptName "FleetUpgrade"
 :local schedulerName "FleetUpgrade-startup"
 :local installerFile "FleetUpgradeInstaller.rsc"
+:local scriptPresent 0
+:local schedulerPresent 0
 
-:local scriptPresent false
-:local schedulerPresent false
-:if ([:len [/system script find where name=$scriptName]] > 0) do={
-    :set scriptPresent true
-}
-:if ([:len [/system scheduler find where name=$schedulerName]] > 0) do={
-    :set schedulerPresent true
-}
+:if ([:len [/system script find where name=$scriptName]] > 0) do={ :set scriptPresent 1 }
+:if ([:len [/system scheduler find where name=$schedulerName]] > 0) do={ :set schedulerPresent 1 }
 
-:if (($scriptPresent = true) && ($schedulerPresent = true)) do={
-    :log info ("FleetUpgradeBootstrap: script and scheduler already installed; nothing to do")
+:if (($scriptPresent = 1) && ($schedulerPresent = 1)) do={
+:log info "FleetUpgradeBootstrap: script and scheduler already installed; nothing to do"
 } else={
-    :log info ("FleetUpgradeBootstrap: incomplete install script=" . $scriptPresent . \
-        " scheduler=" . $schedulerPresent . "; resetting")
+:log info ("FleetUpgradeBootstrap: incomplete install script=" . $scriptPresent . " scheduler=" . $schedulerPresent . "; resetting")
 
-    :do {
-        :local staleSched [/system scheduler find where name=$schedulerName]
-        :if ([:len $staleSched] > 0) do={ /system scheduler remove $staleSched }
-        :local staleScript [/system script find where name=$scriptName]
-        :if ([:len $staleScript] > 0) do={ /system script remove $staleScript }
-        :if ([:len [/system scheduler find where name=$schedulerName]] > 0) do={
-            :error "scheduler remains"
-        }
-        :if ([:len [/system script find where name=$scriptName]] > 0) do={
-            :error "script remains"
-        }
-    } on-error={
-        :log error ("FleetUpgradeBootstrap: failed to remove existing script/scheduler")
-        :error "FleetUpgradeBootstrap: cleanup failed"
-    }
+:do {
+:local staleSched [/system scheduler find where name=$schedulerName]
+:if ([:len $staleSched] > 0) do={ /system scheduler remove $staleSched }
+:local staleScript [/system script find where name=$scriptName]
+:if ([:len $staleScript] > 0) do={ /system script remove $staleScript }
+:if ([:len [/system scheduler find where name=$schedulerName]] > 0) do={ :error "scheduler remains" }
+:if ([:len [/system script find where name=$scriptName]] > 0) do={ :error "script remains" }
+} on-error={
+:log error "FleetUpgradeBootstrap: failed to remove existing script/scheduler"
+:error "FleetUpgradeBootstrap: cleanup failed"
+}
 
-    :do {
-        :local staleInstaller [/file find where name=$installerFile]
-        :if ([:len $staleInstaller] > 0) do={ /file remove $staleInstaller }
-        :if ([:len [/file find where name=$installerFile]] > 0) do={
-            :error "stale installer remains"
-        }
-        /tool fetch url=($baseUrl . $installerFile) mode=http dst-path=$installerFile keep-result=yes
-        :if ([:len [/file find where name=$installerFile]] != 1) do={
-            :error "installer missing after fetch"
-        }
-        :if ([/file get [/file find where name=$installerFile] size] = 0) do={
-            :error "installer empty"
-        }
-    } on-error={
-        :log error ("FleetUpgradeBootstrap: fetch failed url=" . $baseUrl . $installerFile)
-        :error "FleetUpgradeBootstrap: fetch failed"
-    }
+:do {
+:local staleInstaller [/file find where name=$installerFile]
+:if ([:len $staleInstaller] > 0) do={ /file remove $staleInstaller }
+} on-error={
+:log error "FleetUpgradeBootstrap: stale installer remove failed"
+:error "FleetUpgradeBootstrap: stale installer remove failed"
+}
 
-    :do {
-        /import file-name=$installerFile
-    } on-error={
-        :log error ("FleetUpgradeBootstrap: import failed file=" . $installerFile)
-        :error "FleetUpgradeBootstrap: import failed"
-    }
+:do {
+/tool fetch url=($baseUrl . $installerFile) dst-path=$installerFile
+} on-error={
+:log warning ("FleetUpgradeBootstrap: fetch reported error; checking for file url=" . $baseUrl . $installerFile)
+}
 
-    :if ([:len [/system script find where name=$scriptName]] = 0) do={
-        :log error ("FleetUpgradeBootstrap: script missing after import")
-        :error "FleetUpgradeBootstrap: script not installed"
-    }
-    :if ([:len [/system scheduler find where name=$schedulerName]] = 0) do={
-        :do {
-            /system scheduler add name=$schedulerName start-time=startup interval=0s \
-                on-event=("/system script run " . $scriptName) \
-                policy=ftp,reboot,read,write,policy,test disabled=no
-        } on-error={
-            :log error ("FleetUpgradeBootstrap: scheduler create failed after import")
-            :error "FleetUpgradeBootstrap: scheduler create failed"
-        }
-    }
-    :if ([:len [/system scheduler find where name=$schedulerName]] = 0) do={
-        :log error ("FleetUpgradeBootstrap: scheduler missing after import")
-        :error "FleetUpgradeBootstrap: scheduler not installed"
-    }
+:local wait 0
+:local downloaded 0
+:local downloadedSize 0
+:while (($downloaded = 0) && ($wait < 30)) do={
+:set wait ($wait + 1)
+:foreach f in=[/file find where name=$installerFile] do={
+:set downloaded ($downloaded + 1)
+:set downloadedSize [/file get $f size]
+}
+:if ($downloaded = 0) do={ :delay 100ms }
+}
 
-    :do {
-        :local doneInstaller [/file find where name=$installerFile]
-        :if ([:len $doneInstaller] > 0) do={ /file remove $doneInstaller }
-        :if ([:len [/file find where name=$installerFile]] > 0) do={
-            :error "installer remains"
-        }
-    } on-error={
-        :log error ("FleetUpgradeBootstrap: installer cleanup failed file=" . $installerFile)
-        :error "FleetUpgradeBootstrap: cleanup failed"
-    }
+:if ($downloaded = 0) do={
+:log error ("FleetUpgradeBootstrap: installer missing after fetch url=" . $baseUrl . $installerFile)
+:error "FleetUpgradeBootstrap: fetch failed"
+}
+:if ($downloadedSize = 0) do={
+:log error ("FleetUpgradeBootstrap: installer empty after fetch file=" . $installerFile)
+:error "FleetUpgradeBootstrap: fetch failed"
+}
 
-    :log info ("FleetUpgradeBootstrap: installed script=" . $scriptName . \
-        " scheduler=" . $schedulerName)
+:do {
+/import file-name=$installerFile
+} on-error={
+:log error ("FleetUpgradeBootstrap: import failed file=" . $installerFile)
+:error "FleetUpgradeBootstrap: import failed"
+}
+
+:do {
+:local doneInstaller [/file find where name=$installerFile]
+:if ([:len $doneInstaller] > 0) do={ /file remove $doneInstaller }
+} on-error={
+:log error ("FleetUpgradeBootstrap: installer cleanup failed file=" . $installerFile)
+:error "FleetUpgradeBootstrap: cleanup failed"
+}
+
+:log info "FleetUpgradeBootstrap: import complete"
+}
 }
